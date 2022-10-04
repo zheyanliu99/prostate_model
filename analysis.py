@@ -9,6 +9,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.model_selection import cross_val_score
 from sklearn.linear_model import LinearRegression
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools import add_constant
 
 df = pd.read_csv('data/prostate_data.csv')
 df_train =  df[df['train']=='T']
@@ -18,45 +20,73 @@ df_test =  df[df['train']=='F']
 X_test = df_test.drop(['id', 'train', 'lpsa'], axis=1)
 y_test = df_test.lpsa
 
-# %% a) Best-subset linear regression with k chosen by 5-fold cross-validation. 
-def processSubset(feature_set):
-    # Fit model on feature_set and calculate RSS
-    model = sm.OLS(y,X[list(feature_set)])
-    regr = model.fit()
-    RSS = ((regr.predict(X[list(feature_set)]) - y) ** 2).sum()
-    return {"model":regr, "RSS":RSS}
-
-def getBest(k):
-    
-    tic = time.time()
-    
-    results = []
-    
+# %% Best-Set cv
+results = []
+for k in range(1, 9):
     for combo in itertools.combinations(X.columns, k):
-        results.append(processSubset(combo))
-    
-    # Wrap everything up in a nice dataframe
-    models = pd.DataFrame(results)
-    
-    # Choose the model with the highest RSS
-    best_model = models.loc[models['RSS'].argmin()]
-    
-    toc = time.time()
-    print("Processed", models.shape[0], "models on", k, "predictors in", (toc-tic), "seconds.")
-    
-    # Return the best model, along with some other useful information about the model
-    return best_model
+        X_train_bs = X[list(combo)]
+        mse = -cross_val_score(LinearRegression(), X_train_bs, y, 
+                                cv=5, scoring='neg_mean_squared_error')
+        aresult = {'k':k, 'combo':combo, 'mse':np.mean(mse), 'mse_path':mse}
+        results.append(aresult)
 
+results_df = pd.DataFrame(results)
+best_set = results_df.loc[results_df['mse'].argmin()]
+results_df_groupbyt = results_df.groupby('k', as_index=False).min('mse')
 
-models_best = pd.DataFrame(columns=["RSS", "model"])
+results_df_groupby = results_df_groupbyt.merge(results_df, on=['k', 'mse'], how='left')
 
-tic = time.time()
-for i in range(1,8):
-    models_best.loc[i] = getBest(i)
+res_arr = results_df_groupby.mse_path[0].reshape(1,-1)
+for arr in results_df_groupby.mse_path[1:]:
+    res_arr = np.concatenate((res_arr, np.array(arr).reshape(1,-1)), axis=0)
 
-toc = time.time()
-print("Total elapsed time:", (toc-tic), "seconds.")
+plt.semilogx(results_df_groupby.k, res_arr, linestyle=":")
+plt.plot(
+    results_df_groupby.k,
+    results_df_groupby.mse,
+    color="black",
+    label="Average across the folds",
+    linewidth=2,
+)
+plt.axvline(best_set['k'], linestyle="--", color="black", label="k: CV estimate")
 
+ymin = 0
+ymax = 5
+plt.ylim(ymin, ymax)
+plt.xlabel("k")
+plt.ylabel("Mean square error")
+plt.legend()
+_ = plt.title(
+    f"Mean square error on each fold: coordinate descent"
+)
+# %% Best-Set BIC
+results = []
+for k in range(1, 9):
+    for combo in itertools.combinations(X.columns, k):
+        X_train_bs = X[list(combo)]
+        regr = OLS(y, add_constant(X_train_bs)).fit()
+        aresult = {'k':k, 'combo':combo, 'BIC':regr.bic}
+        results.append(aresult)
+
+results_df = pd.DataFrame(results)
+best_set = results_df.loc[results_df['BIC'].argmin()]
+results_df_groupby = results_df.groupby('k', as_index=False).min('BIC')
+
+ax = results_df_groupby.plot(x='k',y='BIC')
+ax.vlines(
+    best_set['k'],
+    results_df_groupby["BIC"].min(),
+    results_df_groupby["BIC"].max(),
+    label="k: BIC estimate",
+    linestyle="--",
+    color="tab:orange",
+)
+ax.set_xlabel("k")
+ax.set_ylabel("BIC criterion")
+ax.legend()
+_ = ax.set_title(
+    f"Information-criterion for model selection"
+)
 # %% Lasso 
 
 ## BIC
@@ -81,13 +111,6 @@ alpha_aic = lasso_lars_ic[-1].alpha_
 results["BIC criterion"] = lasso_lars_ic[-1].criterion_
 alpha_bic = lasso_lars_ic[-1].alpha_
 
-def highlight_min(x):
-    x_min = x.min()
-    return ["font-weight: bold" if v == x_min else "" for v in x]
-
-
-results.style.apply(highlight_min)
-
 ax = results.plot()
 ax.vlines(
     alpha_bic,
@@ -98,11 +121,11 @@ ax.vlines(
     color="tab:orange",
 )
 ax.set_xlabel(r"$\alpha$")
-ax.set_ylabel("criterion")
+ax.set_ylabel("BIC criterion")
 ax.set_xscale("log")
 ax.legend()
 _ = ax.set_title(
-    f"Information-criterion for model selection (training time {fit_time:.2f}s)"
+    f"Information-criterion for model selection"
 )
 
 
@@ -113,8 +136,6 @@ from sklearn.linear_model import LassoCV
 start_time = time.time()
 model = make_pipeline(StandardScaler(), LassoCV(cv=5)).fit(X, y)
 fit_time = time.time() - start_time
-
-import matplotlib.pyplot as plt
 
 ymin, ymax = 0, 8
 lasso = model[-1]
@@ -133,7 +154,7 @@ plt.xlabel(r"$\alpha$")
 plt.ylabel("Mean square error")
 plt.legend()
 _ = plt.title(
-    f"Mean square error on each fold: coordinate descent (train time: {fit_time:.2f}s)"
+    f"Mean square error on each fold"
 )
 
 
